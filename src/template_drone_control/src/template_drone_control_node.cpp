@@ -19,6 +19,8 @@ public:
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
         set_mode_client_ = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
         takeoff_client_ = this->create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
+        land_client_ = this->create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/land");
+
         rmw_qos_profile_t custom_qos = rmw_qos_profile_default;
         custom_qos.depth = 1;
         custom_qos.reliability = RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
@@ -38,6 +40,17 @@ public:
 
         mavros_msgs::srv::CommandBool::Request arming;
         arming.value = true;
+
+        mavros_msgs::srv::CommandTOL::Request takeoff_req;
+        takeoff_req.min_pitch = 0;
+        takeoff_req.yaw = 90;
+        takeoff_req.altitude = 2;
+
+        mavros_msgs::srv::CommandTOL::Request land_req;
+        takeoff_req.min_pitch = 0;
+        takeoff_req.yaw = 0;
+        takeoff_req.altitude = 2;
+
         while (!set_mode_client_->wait_for_service(1s))
         {
             if (!rclcpp::ok())
@@ -48,9 +61,30 @@ public:
             RCLCPP_INFO(this->get_logger(), "Waiting for set_mode service...");
         }
         auto result = set_mode_client_->async_send_request(std::make_shared<mavros_msgs::srv::SetMode::Request>(guided_set_mode_req));
-        auto result_armed = arming_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandBool::Request>(arming));
 
-        // TODO: Test if drone state really changed to GUIDED
+        while (rclcpp::ok() && current_state_.mode != "GUIDED") {
+            rclcpp::spin_some(this->get_node_base_interface());
+            std::this_thread::sleep_for(100ms);
+        }
+        RCLCPP_INFO(this->get_logger(), "Drone is in GUIDED Mode...");
+
+        while (!arming_client_->wait_for_service(1s))
+        {
+            if (!rclcpp::ok())
+            {
+                RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for the arming_client_ service. Exiting.");
+                return;
+            }
+            RCLCPP_INFO(this->get_logger(), "Waiting for set_mode service...");
+        }
+        auto result_armed = arming_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandBool::Request>(arming));
+        auto result_to = takeoff_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(takeoff_req));
+
+        auto result_pos = local_pos_pub_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(takeoff_req));
+
+        std::this_thread::sleep_for(25s);
+
+        auto result_ld = land_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(pos));
 
         // TODO: Arm and Take Off
         RCLCPP_INFO(this->get_logger(), "Sending position command");
@@ -83,6 +117,7 @@ private:
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr set_mode_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
+    rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_client_;
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_sub_;
 
