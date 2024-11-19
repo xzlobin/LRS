@@ -5,7 +5,17 @@
 #include <mavros_msgs/srv/set_mode.hpp>
 #include <mavros_msgs/srv/command_tol.hpp>
 
+#include <fstream>
+#include <sstream>
+
 using namespace std::chrono_literals;
+using namespace std;
+
+struct Waypoint {
+    double x, y ,z;
+    string type;
+    string action;
+};
 
 class TemplateDroneControl : public rclcpp::Node
 {
@@ -89,6 +99,12 @@ public:
         // TODO: Arm and Take Off
         RCLCPP_INFO(this->get_logger(), "Sending position command");
         // TODO: Implement position controller and mission commands here
+    }
+
+    void load_mission(const string &filepath)
+    {
+        ifstream file(filepath);
+        string line;
     }
 
 private:
