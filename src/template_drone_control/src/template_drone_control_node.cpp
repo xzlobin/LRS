@@ -51,16 +51,6 @@ public:
         mavros_msgs::srv::CommandBool::Request arming;
         arming.value = true;
 
-        mavros_msgs::srv::CommandTOL::Request takeoff_req;
-        takeoff_req.min_pitch = 0;
-        takeoff_req.yaw = 90;
-        takeoff_req.altitude = 2;
-
-        mavros_msgs::srv::CommandTOL::Request land_req;
-        takeoff_req.min_pitch = 0;
-        takeoff_req.yaw = 0;
-        takeoff_req.altitude = 2;
-
         while (!set_mode_client_->wait_for_service(1s))
         {
             if (!rclcpp::ok())
@@ -87,24 +77,73 @@ public:
             }
             RCLCPP_INFO(this->get_logger(), "Waiting for set_mode service...");
         }
+        //Arm
         auto result_armed = arming_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandBool::Request>(arming));
-        auto result_to = takeoff_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(takeoff_req));
 
-        auto result_pos = local_pos_pub_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(takeoff_req));
 
-        std::this_thread::sleep_for(25s);
-
-        auto result_ld = land_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandTOL::Request>(pos));
-
-        // TODO: Arm and Take Off
         RCLCPP_INFO(this->get_logger(), "Sending position command");
         // TODO: Implement position controller and mission commands here
+        // Load trajectory 
+        loadTrajectory("trajectory.txt"); 
+        
+        // Start the mission
+        timer_ = this->create_wall_timer(500ms, std::bind(&TemplateDroneControl::timerCallback, this));
     }
 
-    void load_mission(const string &filepath)
-    {
-        ifstream file(filepath);
-        string line;
+    void timerCallback() {
+    if (!trajectory_.empty()) {
+        auto wp = trajectory_.front();
+        trajectory_.erase(trajectory_.begin());
+        geometry_msgs::msg::PoseStamped pose;
+        pose.pose.position.x = wp.x;
+        pose.pose.position.y = wp.y;
+        pose.pose.position.z = wp.z;
+        
+        if (wp.action == "takeoff") {
+            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            takeoff_req - > min_pitch = 0;
+            takeoff_req - > yaw = 0;
+            takeoff_req - > altitude = wp.z;
+            takeoff_client_ - > async_send_request(takeoff_req);
+        } else if (wp.action == "land") {
+            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            land_req - > min_pitch = 0;
+            land_req - > yaw = 0;
+            land_req - > altitude = wp.z;
+            land_client_ - > async_send_request(land_req);
+        } else if (wp.action == "landtakeoff") {
+            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            land_req - > min_pitch = 0;
+            land_req - > yaw = 0;
+            land_req - > altitude = wp.z;
+            land_client_ - > async_send_request(land_req);
+            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            takeoff_req - > min_pitch = 0;
+            takeoff_req - > yaw = 0;
+            takeoff_req - > altitude = wp.z;
+            takeoff_client_ - > async_send_request(takeoff_req);
+        } else if (wp.action == "yaw180") {
+            pose.pose.orientation.z = sin(180.0 / 2.0 * M_PI / 180.0); 
+            pose.pose.orientation.w = cos(180.0 / 2.0 * M_PI / 180.0); 
+        }
+
+        local_pos_pub_ - > publish(pose);
+    }
+    }
+
+    void loadTrajectory(const std::string &filename) { 
+        std::ifstream file(filename);
+        std::string line;
+         while (std::getline(file, line)) {
+             std::istringstream ss(line);
+              Waypoint wp; std::string speed, action;
+              std::getline(ss, wp.x, ',');
+              std::getline(ss, wp.y, ',');
+              std::getline(ss, wp.z, ',');
+              std::getline(ss, speed, ',');
+              std::getline(ss, action, ',');
+              wp.speed = speed; wp.action = action;
+              trajectory_.push_back(wp); 
     }
 
 private:
@@ -134,8 +173,11 @@ private:
     rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr set_mode_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_client_;
+    rclcpp::TimerBase::SharedPtr timer_;
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_sub_;
+
+    std::vector<Waypoint> trajectory_;
 
     mavros_msgs::msg::State current_state_;
 };
