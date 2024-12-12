@@ -15,6 +15,10 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
+find_package(Lua REQUIRED)
+
+include_directories(${LUA_INCLUDE_DIR})
+include_directories(/home/nzuri/luacpp/Source)
 
 # Declare a C++ executable
 add_executable(template_drone_control_node src/template_drone_control_node.cpp)

@@ -7,14 +7,21 @@
 #include <geometry_msgs/msg/quaternion.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <std_msgs/msg/string.hpp>
 
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <regex>
 
+//#include <LuaCpp.hpp>
+
 using namespace std::chrono_literals;
 using namespace std;
+
+//using namespace LuaCpp;
+//using namespace LuaCpp::Registry;
+//using namespace LuaCpp::Engine;
 
 struct Waypoint {
     double x, y ,z;
@@ -27,9 +34,14 @@ class TemplateDroneControl : public rclcpp::Node
 public:
     TemplateDroneControl() : Node("template_drone_control_node")
     {
+        //lua_ = &lua;
         // Set up ROS publishers, subscribers and service clients
         state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
             "mavros/state", 10, std::bind(&TemplateDroneControl::state_cb, this, std::placeholders::_1));
+
+        lua_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "lua_topic", 10, std::bind(&TemplateDroneControl::interpret, this, std::placeholders::_1));
+
         local_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("mavros/setpoint_position/local", 10);
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
         set_mode_client_ = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
@@ -50,6 +62,120 @@ public:
             std::this_thread::sleep_for(100ms);
         }
 
+        this->prepare_take_off_init();
+
+        RCLCPP_INFO(this->get_logger(), "DRONE READY");
+    }
+
+    bool is_at_waypoint(const Waypoint& wp, const string& type)
+    {
+        double eps = (type == "hard" ? 0.1 : 1);
+        return (abs(current_local_pos_.pose.position.x-wp.x) < eps &&
+                abs(current_local_pos_.pose.position.y-wp.y) < eps &&
+                abs(current_local_pos_.pose.position.z-wp.z) < eps);
+    }
+
+    void timerCallback() {
+    if (!trajectory_.empty()) {
+        auto wp = trajectory_.front();
+        active_waypoint_ = wp;
+        trajectory_.erase(trajectory_.begin());
+        geometry_msgs::msg::PoseStamped pose;
+        pose.pose.position.x = wp.x;
+        pose.pose.position.y = wp.y;
+        pose.pose.position.z = wp.z;
+
+        if (wp.action == "takeoff") {
+            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            takeoff_req -> min_pitch = 0;
+            takeoff_req -> yaw = 0;
+            takeoff_req -> altitude = wp.z;
+            takeoff_client_ -> async_send_request(takeoff_req);
+            RCLCPP_INFO(this->get_logger(), "Taking off...");
+            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
+            {
+                //rclcpp::spin_some(this->get_node_base_interface());
+                std::this_thread::sleep_for(100ms);
+            }
+            std::this_thread::sleep_for(1000ms);
+            RCLCPP_INFO(this->get_logger(), "Take off done: -> %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        }
+        if (wp.action.find("yaw") != string::npos) {
+            regex rg("yaw(\\d+)");
+            smatch match;
+            regex_search(wp.action, match, rg);
+            auto yaw = stod(match[1]);
+            tf2::Quaternion q;
+            q.setRPY(0, 0, yaw * M_PI / 180);
+            pose.pose.orientation = tf2::toMsg(q);
+            RCLCPP_INFO(this->get_logger(), "Yaw adjustment: %f", yaw);
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Publishing point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        local_pos_pub_ -> publish(pose);
+
+        while( rclcpp::ok() && !is_at_waypoint(wp, wp.type) )
+        {
+            check_state();
+            //rclcpp::spin_some(this->get_node_base_interface());
+            std::this_thread::sleep_for(100ms);
+        }
+        RCLCPP_INFO(this->get_logger(), "Reached point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        
+        if (wp.action == "land") {
+            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            land_req -> min_pitch = 0;
+            land_req -> yaw = 0;
+            land_req -> altitude = wp.z;
+            land_client_ -> async_send_request(land_req);
+            RCLCPP_INFO(this->get_logger(), "Landing...");
+            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
+            {
+                //rclcpp::spin_some(this->get_node_base_interface());
+                std::this_thread::sleep_for(100ms);
+            }
+            std::this_thread::sleep_for(1000ms);
+            RCLCPP_INFO(this->get_logger(), "Landing done: <- %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        } else if (wp.action == "landtakeoff") {
+            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            land_req -> min_pitch = 0;
+            land_req -> yaw = 0;
+            land_req -> altitude = 0;
+            land_client_ -> async_send_request(land_req);
+            RCLCPP_INFO(this->get_logger(), "Landing...");
+            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z) > 0.1 )
+            {
+                //rclcpp::spin_some(this->get_node_base_interface());
+                std::this_thread::sleep_for(100ms);
+            }
+            std::this_thread::sleep_for(10000ms);
+            RCLCPP_INFO(this->get_logger(), "Landing done, taking off...");
+
+            prepare_take_off();
+
+            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
+            takeoff_req -> min_pitch = 0;
+            takeoff_req -> yaw = 0;
+            takeoff_req -> altitude = wp.z;
+            takeoff_client_ -> async_send_request(takeoff_req);
+            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
+            {
+                //rclcpp::spin_some(this->get_node_base_interface());
+                std::this_thread::sleep_for(100ms);
+            }
+            std::this_thread::sleep_for(1000ms);
+            RCLCPP_INFO(this->get_logger(), "Take off done: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        }
+
+        if (wp.type == "hard") 
+        {
+            this_thread::sleep_for(5000ms);
+        }
+    }
+    }
+
+    void prepare_take_off_init()
+    {
         mavros_msgs::srv::SetMode::Request guided_set_mode_req;
         guided_set_mode_req.custom_mode = "GUIDED";
 
@@ -89,134 +215,6 @@ public:
             std::this_thread::sleep_for(100ms);
         }
         RCLCPP_INFO(this->get_logger(), "Drone is ARMED...");
-
-
-        RCLCPP_INFO(this->get_logger(), "Sending position command");
-        // TODO: Implement position controller and mission commands here
-        // Load trajectory 
-        loadTrajectory("/home/nzuri/trajectory.txt"); 
-        
-        //separate thread for spin some
-        //spin_thread_ = thread([this](){
-        //    rclcpp::Rate rate(10);
-        //    while (rclcpp::ok()) {
-        //        this->spin_some();
-        //        rate.sleep();
-        //    }
-        //});
-
-        // Start the mission
-        //timer_ = this->create_wall_timer(500ms, std::bind(&TemplateDroneControl::timerCallback, this));
-        while(rclcpp::ok())
-        {
-            timerCallback();
-            this_thread::sleep_for(100ms);
-        }
-    }
-
-    bool is_at_waypoint(const Waypoint& wp, const string& type)
-    {
-        double eps = (type == "hard" ? 0.1 : 1);
-        return (abs(current_local_pos_.pose.position.x-wp.x) < eps &&
-                abs(current_local_pos_.pose.position.y-wp.y) < eps &&
-                abs(current_local_pos_.pose.position.z-wp.z) < eps);
-    }
-
-    void timerCallback() {
-    if (!trajectory_.empty()) {
-        auto wp = trajectory_.front();
-        trajectory_.erase(trajectory_.begin());
-        geometry_msgs::msg::PoseStamped pose;
-        pose.pose.position.x = wp.x;
-        pose.pose.position.y = wp.y;
-        pose.pose.position.z = wp.z;
-
-        if (wp.action == "takeoff") {
-            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
-            takeoff_req -> min_pitch = 0;
-            takeoff_req -> yaw = 0;
-            takeoff_req -> altitude = wp.z;
-            takeoff_client_ -> async_send_request(takeoff_req);
-            RCLCPP_INFO(this->get_logger(), "Taking off...");
-            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
-            {
-                rclcpp::spin_some(this->get_node_base_interface());
-                std::this_thread::sleep_for(100ms);
-            }
-            std::this_thread::sleep_for(1000ms);
-            RCLCPP_INFO(this->get_logger(), "Take off done: -> %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        }
-        if (wp.action.find("yaw") != string::npos) {
-            regex rg("yaw(\\d+)");
-            smatch match;
-            regex_search(wp.action, match, rg);
-            auto yaw = stod(match[1]);
-            tf2::Quaternion q;
-            q.setRPY(0, 0, yaw * M_PI / 180);
-            pose.pose.orientation = tf2::toMsg(q);
-            RCLCPP_INFO(this->get_logger(), "Yaw adjustment: %f", yaw);
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Publishing point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        local_pos_pub_ -> publish(pose);
-
-        while( rclcpp::ok() && !is_at_waypoint(wp, wp.type) )
-        {
-            rclcpp::spin_some(this->get_node_base_interface());
-            std::this_thread::sleep_for(100ms);
-        }
-        RCLCPP_INFO(this->get_logger(), "Reached point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        
-        if (wp.action == "land") {
-            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
-            land_req -> min_pitch = 0;
-            land_req -> yaw = 0;
-            land_req -> altitude = wp.z;
-            land_client_ -> async_send_request(land_req);
-            RCLCPP_INFO(this->get_logger(), "Landing...");
-            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
-            {
-                rclcpp::spin_some(this->get_node_base_interface());
-                std::this_thread::sleep_for(100ms);
-            }
-            std::this_thread::sleep_for(1000ms);
-            RCLCPP_INFO(this->get_logger(), "Landing done: <- %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        } else if (wp.action == "landtakeoff") {
-            auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
-            land_req -> min_pitch = 0;
-            land_req -> yaw = 0;
-            land_req -> altitude = 0;
-            land_client_ -> async_send_request(land_req);
-            RCLCPP_INFO(this->get_logger(), "Landing...");
-            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z) > 0.1 )
-            {
-                rclcpp::spin_some(this->get_node_base_interface());
-                std::this_thread::sleep_for(100ms);
-            }
-            std::this_thread::sleep_for(10000ms);
-            RCLCPP_INFO(this->get_logger(), "Landing done, taking off...");
-
-            prepare_take_off();
-
-            auto takeoff_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
-            takeoff_req -> min_pitch = 0;
-            takeoff_req -> yaw = 0;
-            takeoff_req -> altitude = wp.z;
-            takeoff_client_ -> async_send_request(takeoff_req);
-            while( rclcpp::ok() && abs(current_local_pos_.pose.position.z-wp.z) > 0.1 )
-            {
-                rclcpp::spin_some(this->get_node_base_interface());
-                std::this_thread::sleep_for(100ms);
-            }
-            std::this_thread::sleep_for(1000ms);
-            RCLCPP_INFO(this->get_logger(), "Take off done: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        }
-
-        if (wp.type == "hard") 
-        {
-            this_thread::sleep_for(5000ms);
-        }
-    }
     }
 
     void prepare_take_off()
@@ -239,7 +237,7 @@ public:
         auto result = set_mode_client_->async_send_request(std::make_shared<mavros_msgs::srv::SetMode::Request>(guided_set_mode_req));
 
         while (rclcpp::ok() && current_state_.mode != "GUIDED") {
-            rclcpp::spin_some(this->get_node_base_interface());
+            //rclcpp::spin_some(this->get_node_base_interface());
             std::this_thread::sleep_for(100ms);
         }
         RCLCPP_INFO(this->get_logger(), "Drone is in GUIDED Mode...");
@@ -256,7 +254,7 @@ public:
         //Arm
         auto result_armed = arming_client_->async_send_request(std::make_shared<mavros_msgs::srv::CommandBool::Request>(arming));
         while (rclcpp::ok() && !current_state_.armed) {
-            rclcpp::spin_some(this->get_node_base_interface());
+            //rclcpp::spin_some(this->get_node_base_interface());
             std::this_thread::sleep_for(100ms);
         }
         RCLCPP_INFO(this->get_logger(), "Drone is ARMED...");
@@ -281,7 +279,65 @@ public:
               wp.type = type; wp.action = action;
               trajectory_.push_back(wp); 
               cout << wp.x << ", " << wp.y << ", " << wp.z << ", " << wp.type << ", " << wp.action << "\n";
+        }
     }
+
+    void check_state(){
+        geometry_msgs::msg::PoseStamped pose;
+        pose.pose.position.x = current_local_pos_.pose.position.x;
+        pose.pose.position.y = current_local_pos_.pose.position.y;
+        pose.pose.position.z = current_local_pos_.pose.position.z;
+
+        if(replay_state_ != 1)
+        {
+            local_pos_pub_ -> publish(pose);
+            while(replay_state_ != 1){
+                this_thread::sleep_for(100ms);
+            }
+            geometry_msgs::msg::PoseStamped pose;
+            pose.pose.position.x = active_waypoint_.x;
+            pose.pose.position.y = active_waypoint_.y;
+            pose.pose.position.z = active_waypoint_.z;
+            local_pos_pub_ -> publish(pose);
+        }
+    }
+
+    void drone_stop()
+    {
+        //request stop
+        replay_state_ = 0;
+    }
+
+    void drone_continue()
+    {
+        // replay active
+        replay_state_ = 1;
+    }
+
+    void circle_around(double x, double y, double z)
+    {}
+
+    void start_spinning() {
+        spin_thread_ = std::thread([this]() {
+            rclcpp::spin(this->get_node_base_interface());
+        });
+    }
+    void stop_spinning() {
+        rclcpp::shutdown();
+        if (spin_thread_.joinable()){
+            spin_thread_.join();
+        }
+    }
+    void do_thing()
+    {
+        // Load trajectory 
+        loadTrajectory("/home/nzuri/trajectory.txt"); 
+        
+        while(rclcpp::ok())
+        {
+            timerCallback();
+            this_thread::sleep_for(100ms);
+        }
     }
 
 private:
@@ -310,6 +366,25 @@ private:
         //RCLCPP_INFO(this->get_logger(), "Current State: %s", current_state_.mode.c_str());
     }
 
+    void interpret(const std_msgs::msg::String::SharedPtr msg)
+    {
+        auto& str = msg->data;
+        RCLCPP_INFO(this->get_logger(), "Received string: %s", str.c_str());
+
+        try{
+            if(str.find("stop") != string::npos)
+            {
+                drone_stop();
+            }
+            if(str.find("continue") != string::npos)
+            {
+                drone_continue();
+            }
+        } catch (std::runtime_error& e){
+            RCLCPP_INFO(this->get_logger(), "Critical ERROR: %s", e.what());
+        }
+    }
+
     rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
@@ -317,20 +392,35 @@ private:
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_client_;
     rclcpp::TimerBase::SharedPtr timer_;
-    thread spin_thread_;
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_sub_;
     geometry_msgs::msg::PoseStamped current_local_pos_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr lua_sub_;
 
     std::vector<Waypoint> trajectory_;
+    Waypoint active_waypoint_;
+
+    int replay_state_ = 0;
 
     mavros_msgs::msg::State current_state_;
+
+    std::thread spin_thread_;
 };
+
 
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<TemplateDroneControl>());
-    rclcpp::shutdown();
+
+    auto node = std::make_shared<TemplateDroneControl>();
+
+    node->start_spinning();
+
+    node->do_thing();
+
+    node->stop_spinning();
+
+    //rclcpp::spin(std::make_shared<TemplateDroneControl>());
+    //rclcpp::shutdown();
     return 0;
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>lua_publisher_node</name>
+  <name>lua_publisher</name>
   <version>0.0.1</version>
   <description>lua_publisher_node</description>
   <maintainer email="your_email@example.com">Your Name</maintainer>

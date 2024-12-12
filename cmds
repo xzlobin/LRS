@@ -1,0 +1,15 @@
+colcon build
+source install/setup.bash
+
+
+gazebo LRS-FEI/worlds/fei_lrs_gazebo.world
+
+
+cd ardupilot/ArduCopter
+sim_vehicle.py -f gazebo-iris --console -l 48.15084570555732,17.072729745416016,150,0
+
+ros2 run mavros mavros_node --ros-args -p fcu_url:=udp://127.0.0.1:14551@14555
+
+
+ros2 run template_drone_control template_drone_control_node
+ros2 run lua_publisher lua_publisher_node

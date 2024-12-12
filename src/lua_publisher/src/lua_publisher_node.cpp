@@ -7,7 +7,7 @@ public:
     LuaPublisher() : Node("lua_publisher_node") {
         publisher_ = this->create_publisher<std_msgs::msg::String>("lua_topic", 10);
         timer_ = this->create_wall_timer(
-            std::chrono::seconds(1), std::bind(&LuaPublisher::publish_message, this));
+            std::chrono::milliseconds(100), std::bind(&LuaPublisher::publish_message, this));
     }
 
 private:
