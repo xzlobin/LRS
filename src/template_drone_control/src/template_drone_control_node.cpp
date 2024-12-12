@@ -111,16 +111,29 @@ public:
             RCLCPP_INFO(this->get_logger(), "Yaw adjustment: %f", yaw);
         }
 
+        //--------------------------------------//
         RCLCPP_INFO(this->get_logger(), "Publishing point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
-        local_pos_pub_ -> publish(pose);
-
-        while( rclcpp::ok() && !is_at_waypoint(wp, wp.type) )
-        {
-            check_state();
-            //rclcpp::spin_some(this->get_node_base_interface());
-            std::this_thread::sleep_for(100ms);
+        if (wp.action.find("circleR") != string::npos) {
+            regex rg("circleR(\\d+)");
+            smatch match;
+            regex_search(wp.action, match, rg);
+            auto R = stod(match[1]);
+            
+            RCLCPP_INFO(this->get_logger(), "Circle R: %f", R);
+            circle_around(wp.x, wp.y, wp.z, R);
         }
-        RCLCPP_INFO(this->get_logger(), "Reached point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        else
+        {
+            local_pos_pub_ -> publish(pose);
+            while( rclcpp::ok() && !is_at_waypoint(wp, wp.type) )
+            {
+                check_state();
+                //rclcpp::spin_some(this->get_node_base_interface());
+                std::this_thread::sleep_for(10ms);
+            }
+            RCLCPP_INFO(this->get_logger(), "Reached point: %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        }
+        //--------------------------------------//
         
         if (wp.action == "land") {
             auto land_req = std::make_shared < mavros_msgs::srv::CommandTOL::Request > ();
@@ -304,7 +317,7 @@ public:
 
     void drone_stop()
     {
-        //request stop
+        // request stop
         replay_state_ = 0;
     }
 
@@ -314,8 +327,50 @@ public:
         replay_state_ = 1;
     }
 
-    void circle_around(double x, double y, double z)
-    {}
+    void circle_around(double x_, double y_, double z_, double radius_)
+    {
+        double speed_ = 1;
+        auto message = geometry_msgs::msg::PoseStamped();   
+        double phase = 0;
+        int delay_ms = 50;
+        std::chrono::milliseconds duration(delay_ms);
+        auto start_time = this->now();
+
+        while(phase < 2*M_PI) speed_ * elapsed_time
+        {
+            double x = x_ + radius_ * std::cos(phase);
+            double y = y_ + radius_ * std::sin(phase);
+            double z = z_;
+            double yaw = std::atan2(target_y_ - y, target_x_ - x);
+
+            message.pose.position.x = x;
+            message.pose.position.y = y;
+            message.pose.position.z = z;
+            tf2::Quaternion q;
+            q.setRPY(0, 0, yaw);
+            message.pose.orientation = tf2::toMsg(q);
+            message.header.stamp = this->now();
+            publisher_->publish(message);
+
+            Waypoint wp;
+            wp.x = x;
+            wp.y = y;
+            wp.z = z;
+            wp.type = "hard"; wp.action = "";
+            while( rclcpp::ok() && !is_at_waypoint(wp,"hard") )
+            {
+                std::this_thread::sleep_for(duration);
+            }
+            if(phase == 0.){
+                start_time = this->now();
+            }
+            auto current_time = this->now();
+            double elapsed_time = (current_time - start_time).seconds();
+            phase += speed_ * elapsed_time;
+        }
+    }
+
+    
 
     void start_spinning() {
         spin_thread_ = std::thread([this]() {
@@ -379,6 +434,15 @@ private:
             if(str.find("continue") != string::npos)
             {
                 drone_continue();
+            }
+            if (str.find("circleR") != string::npos) {
+                regex rg("circleR(\\d+)");
+                smatch match;
+                regex_search(str, match, rg);
+                auto R = stod(match[1]);
+            
+                RCLCPP_INFO(this->get_logger(), "Circle R: %f", R);
+                circle_around(current_local_pos_.pose.position.x, current_local_pos_.pose.position.y, current_local_pos_.pose.position.z, R);
             }
         } catch (std::runtime_error& e){
             RCLCPP_INFO(this->get_logger(), "Critical ERROR: %s", e.what());
