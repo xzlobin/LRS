@@ -5,6 +5,7 @@
 #include <mavros_msgs/srv/set_mode.hpp>
 #include <mavros_msgs/srv/command_tol.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <std_msgs/msg/string.hpp>
@@ -42,7 +43,8 @@ public:
         lua_sub_ = this->create_subscription<std_msgs::msg::String>(
             "lua_topic", 10, std::bind(&TemplateDroneControl::interpret, this, std::placeholders::_1));
 
-        local_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("mavros/setpoint_position/local", 10);
+        local_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("mavros/setpoint_position/local", 500);
+        local_twist_pub_= this->create_publisher<geometry_msgs::msg::Twist>("mavros/setpoint_velocity/cmd_vel_unstamped", 10);
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
         set_mode_client_ = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
         takeoff_client_ = this->create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
@@ -99,6 +101,10 @@ public:
             }
             std::this_thread::sleep_for(1000ms);
             RCLCPP_INFO(this->get_logger(), "Take off done: -> %f, %f, %f, %s, %s", wp.x, wp.y, wp.z, wp.type.c_str(), wp.action.c_str());
+        }
+        if (wp.action == "stop")
+        {
+            drone_stop();
         }
         if (wp.action.find("yaw") != string::npos) {
             regex rg("yaw(\\d+)");
@@ -329,19 +335,19 @@ public:
 
     void circle_around(double x_, double y_, double z_, double radius_)
     {
-        double speed_ = 1;
+        double speed_ = 0.01;
         auto message = geometry_msgs::msg::PoseStamped();   
         double phase = 0;
-        int delay_ms = 50;
+        int delay_ms = 10;
         std::chrono::milliseconds duration(delay_ms);
         auto start_time = this->now();
 
-        while(phase < 2*M_PI) speed_ * elapsed_time
+        while(phase < 2*M_PI)
         {
             double x = x_ + radius_ * std::cos(phase);
             double y = y_ + radius_ * std::sin(phase);
             double z = z_;
-            double yaw = std::atan2(target_y_ - y, target_x_ - x);
+            double yaw = std::atan2(y_ - y, x_ - x);
 
             message.pose.position.x = x;
             message.pose.position.y = y;
@@ -350,24 +356,86 @@ public:
             q.setRPY(0, 0, yaw);
             message.pose.orientation = tf2::toMsg(q);
             message.header.stamp = this->now();
-            publisher_->publish(message);
+            local_pos_pub_->publish(message);
 
             Waypoint wp;
             wp.x = x;
             wp.y = y;
             wp.z = z;
             wp.type = "hard"; wp.action = "";
-            while( rclcpp::ok() && !is_at_waypoint(wp,"hard") )
-            {
-                std::this_thread::sleep_for(duration);
-            }
             if(phase == 0.){
+                while( rclcpp::ok() && !is_at_waypoint(wp,"hard") )
+                {
+                    std::this_thread::sleep_for(duration);
+                }
                 start_time = this->now();
+                phase = 0.000001;
+                continue;
             }
+            std::this_thread::sleep_for(duration);
             auto current_time = this->now();
             double elapsed_time = (current_time - start_time).seconds();
             phase += speed_ * elapsed_time;
         }
+    }
+
+    void circle_around__(double x_, double y_, double z_, double radius_)
+    {
+        double speed_ = 0.1;
+        auto message = geometry_msgs::msg::PoseStamped();   
+        double phase = 0;
+        int delay_ms = 10;
+        std::chrono::milliseconds duration(delay_ms);
+
+        double x = x_ + radius_ * std::cos(phase);
+        double y = y_ + radius_ * std::sin(phase);
+        double z = z_;
+        double yaw = std::atan2(y_ - y, x_ - x);
+        message.pose.position.x = x;
+        message.pose.position.y = y;
+        message.pose.position.z = z;
+        tf2::Quaternion q;
+        q.setRPY(0, 0, yaw);
+        message.pose.orientation = tf2::toMsg(q);
+        message.header.stamp = this->now();
+        local_pos_pub_->publish(message);
+        Waypoint wp;
+        wp.x = x;
+        wp.y = y;
+        wp.z = z;
+        wp.type = "hard"; wp.action = "";
+        while( rclcpp::ok() && !is_at_waypoint(wp,"hard") )
+        {
+            std::this_thread::sleep_for(duration);
+        }
+        auto start_time = this->now();
+
+        auto msg_twist = geometry_msgs::msg::Twist();
+        double angular = speed_ / radius_;
+        msg_twist.linear.x = speed_;
+        msg_twist.linear.y = 0.;
+        msg_twist.linear.z = 0.;
+
+        msg_twist.angular.x = 0;
+        msg_twist.angular.y = 0.;
+        msg_twist.angular.z = angular;
+        local_twist_pub_-> publish(msg_twist);
+
+        std::chrono::duration<double> duration_half(M_PI/angular);
+        std::this_thread::sleep_for(duration_half);
+        while( rclcpp::ok())
+        {
+            auto current_time = this->now();
+            double elapsed_time = (current_time - start_time).seconds();
+            if(elapsed_time > M_PI/angular){
+                if(is_at_waypoint(wp,"hard")){
+                    break;
+                }
+            }
+            local_twist_pub_-> publish(msg_twist);
+            std::this_thread::sleep_for(duration);
+        }
+
     }
 
     
@@ -442,7 +510,10 @@ private:
                 auto R = stod(match[1]);
             
                 RCLCPP_INFO(this->get_logger(), "Circle R: %f", R);
-                circle_around(current_local_pos_.pose.position.x, current_local_pos_.pose.position.y, current_local_pos_.pose.position.z, R);
+                std::thread t([this, R](){
+                    circle_around(current_local_pos_.pose.position.x, current_local_pos_.pose.position.y, current_local_pos_.pose.position.z, R);
+                });
+                t.detach();
             }
         } catch (std::runtime_error& e){
             RCLCPP_INFO(this->get_logger(), "Critical ERROR: %s", e.what());
@@ -451,6 +522,7 @@ private:
 
     rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr local_twist_pub_;
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr set_mode_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
